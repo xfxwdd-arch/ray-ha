@@ -27,7 +27,6 @@ RUN mkdir -p /root/ray || true
 # 启动和探活脚本
 COPY start.sh /root/ray/start.sh
 COPY livenessProbe.sh /root/ray/livenessProbe.sh
-COPY readinessProbe.sh /root/ray/readinessProbe.sh
 
 RUN chmod 777 /root && chmod 777 /root/ray && chmod 777 /root/ray/*.sh
 
