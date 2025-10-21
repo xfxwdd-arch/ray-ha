@@ -1,0 +1,108 @@
+appspace:
+  charts:
+    replica: 5
+    log:
+      efk:
+        enable: false
+      bls:
+        enable: false
+    ingress:
+      bgw:
+        enable: false
+      ens:
+        enable: false
+      outboundNetwork:
+        enable: false
+      service:
+        serviceType: ClusterIP
+    podSchedule:
+      maxPodPerNode: 0
+    nodeSelector: {}
+    security:
+      enable: false
+    monitor:
+      cprom:
+        enable: false
+    workload:
+      statefulset:
+        updateType: RollingUpdate
+    containers:
+    - name: ray-head
+      command:
+      - /bin/bash
+      - /root/ray/start.sh
+      args:
+      - head
+      resources:
+        resourceType: NORMALIZED
+        cpu: '15'
+        memory: 20Gi
+        ephemeralStorage: 30.00Gi
+        limitMemory: ''
+        limitEphemeralStorage: ''
+      envs:
+      - name: RAY_NODE_TYPE
+        value: head
+      - name: RAY_HEAD_POD_IP
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      probe:
+        livenessProbe:
+          enable: true
+          type: EXEC
+          path: /health
+          port: main
+          scheme: HTTP
+          cmd:
+          - /bin/bash
+          - /root/ray/livenessProbe.sh
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 5
+        readinessProbe:
+          enable: true
+          type: EXEC
+          path: /health
+          port: main
+          scheme: HTTP
+          cmd:
+          - /bin/bash
+          - -c
+          - exit 0
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+          successThreshold: 2
+          timeoutSeconds: 5
+      ports:
+      - type: NAMED_STATIC
+        name: main
+        protocol: TCP
+        portRange:
+          from: 8080
+        rangeNames: {}
+      - type: NAMED_STATIC
+        name: dashbord-port
+        protocol: TCP
+        portRange:
+          from: 8265
+        rangeNames: {}
+      - type: NAMED_STATIC
+        name: gcs
+        protocol: TCP
+        portRange:
+          from: 8009
+        rangeNames: {}
+      paths: []
+      sync:
+        preStopFlowSync:
+          enable: true
+          preStopWait: 180
+    podAvailable:
+      enable: false
+    flywheel:
+      enable: false
+    faultyPodMigrator: {}
