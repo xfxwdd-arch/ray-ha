@@ -1,0 +1,54 @@
+appspace:
+  version: v2
+  build:
+    containers:
+    - name: ray-head
+      multiPlatformBuild: false
+      testEnvMultiPlatformBuild: false
+      staticImage: iregistry.baidu-int.com/search-data/ray-demo
+      staticImageTag: v20251017-1
+      image: iregistry.baidu-int.com/search-data/ray-demo:v20251017-1
+      type: STATIC_IMAGE
+      appCodePath:
+      - profile: ''
+      envSpec: []
+  charts:
+    workload:
+      kind: STATEFUL
+    applicationConfig:
+      llmTrace: false
+      framework: none
+    defaultVolume:
+      cnap-nsswitch-conf:
+        enable: true
+        mountPath: ''
+      cnap-noah-dir:
+        enable: true
+        mountPath: ''
+      cnap-libnss-bns-2-conf:
+        enable: true
+        mountPath: ''
+      cnap-libcuda:
+        enable: false
+        mountPath: ''
+      cnap-root-opt:
+        enable: true
+        mountPath: ''
+      cnap-time-location:
+        enable: true
+        mountPath: ''
+      cnap-nvidia-smi:
+        enable: false
+        mountPath: ''
+      cnap-libnvidia-ml:
+        enable: false
+        mountPath: ''
+      cnap-libnvidia-ptxjitcompiler:
+        enable: false
+        mountPath: ''
+      cnap-home-opt:
+        enable: true
+        mountPath: ''
+      cnap-libnss-bns-conf:
+        enable: true
+        mountPath: ''
