@@ -18,6 +18,29 @@ LEADER_TTL=30
 CHECK_INTERVAL=10
 CONNECTION_TIMEOUT=10
 
+# GCS 容错配置 - 使用 Redis 作为外部存储
+GCS_STORAGE_ADDRESS="${REDIS_HOST}:${REDIS_PORT}"
+GCS_STORAGE_NAMESPACE="${app_env}:ray:gcs"
+
+# 任务容错：启用任务重试和对象重建
+RAY_enable_object_reconstruction="1"  # 启用对象血缘跟踪和重建
+RAY_max_direct_call_object_size="104857600"  # 100MB，大对象存储到 Object Store
+RAY_task_retry_delay_ms="1000"  # 任务重试延迟 1 秒
+
+# Actor 容错：启用 Actor 自动重启
+#RAY_actor_restart_on_raylet_death="1"  # Raylet 死亡时重启 Actor
+
+# Worker 健康检查：检测 Worker 故障
+RAY_health_check_initial_delay_ms="5000"  # 初次健康检查延迟 5 秒
+RAY_health_check_period_ms="10000"  # 健康检查周期 10 秒
+RAY_health_check_timeout_ms="30000"  # 健康检查超时 30 秒
+RAY_health_check_failure_threshold="3"  # 失败 3 次后标记为不健康
+
+# GCS 容错超时配置
+#RAY_gcs_storage_check_connection_delay_ms="1000"  # GCS 存储连接检查延迟
+RAY_gcs_rpc_server_reconnect_timeout_s="60"  # GCS RPC 重连超时 60 秒
+RAY_gcs_server_request_timeout_seconds="5"  # GCS 请求超时 5 秒
+
 # HTTP健康检查接口配置
 HEALTH_CHECK_PORT="${APPSPACE_MAIN_PORT:-8080}"
 
@@ -40,33 +63,33 @@ redis_cmd() {
 
 # 等待 Redis 可用
 wait_for_redis() {
-    log_msg "INFO" "Wait for Redis cluster available..."
+    log_msg "INFO" "Waiting for Redis cluster to be available..."
     local retries=0
     local max_retries=30
 
     while [ $retries -lt $max_retries ]; do
         if redis_cmd ping >/dev/null 2>&1; then
-            log_msg "INFO" "Redis cluster connect succ"
+            log_msg "INFO" "Redis cluster connection successful"
             return 0
         fi
         retries=$((retries + 1))
         sleep 2
     done
 
-    log_msg "ERROR" "Redis connection timeout after $((max_retries * 2)) seconds"
+    log_msg "ERROR" "Redis connection timeout, failed after waiting $((max_retries * 2)) seconds"
     exit 1
 }
 
 # === HTTP健康检查服务 ===
 start_health_check_server() {
-    log_msg "INFO" "Starting health check server on port $HEALTH_CHECK_PORT"
+    log_msg "INFO" "Starting health check service on port: $HEALTH_CHECK_PORT"
 
     # 创建临时目录用于存放脚本
     local temp_dir=$(mktemp -d)
     local server_script="$temp_dir/health_server.py"
 
     # 生成Python HTTP服务器脚本
-    cat > "$server_script" << 'EOF'
+    cat > "$server_script" << 'EOFPYTHON'
 #!/usr/bin/env python3
 import json
 import subprocess
@@ -205,7 +228,7 @@ def run_server():
 
 if __name__ == '__main__':
     run_server()
-EOF
+EOFPYTHON
 
     # 设置环境变量并启动服务器
     export POD_NAME NODE_ROLE POD_IP GCS_PORT DASHBOARD_PORT REDIS_HOST REDIS_PORT LEADER_KEY HEALTH_CHECK_PORT
@@ -215,7 +238,7 @@ EOF
     # 等待服务器启动
     sleep 2
     if kill -0 $server_pid 2>/dev/null; then
-        log_msg "INFO" "Health check server started successfully (PID: $server_pid)"
+        log_msg "INFO" "Health check service started successfully (PID: $server_pid)"
         echo $server_pid > /tmp/health_server.pid
     else
         log_msg "ERROR" "Failed to start health check server"
@@ -226,7 +249,7 @@ stop_health_check_server() {
     if [ -f /tmp/health_server.pid ]; then
         local pid=$(cat /tmp/health_server.pid)
         if kill -0 $pid 2>/dev/null; then
-            log_msg "INFO" "Stopping health check server (PID: $pid)"
+            log_msg "INFO" "Stopping health check service (PID: $pid)"
             kill $pid 2>/dev/null || true
             rm -f /tmp/health_server.pid
         fi
@@ -251,61 +274,116 @@ renew_leadership() {
 # enable-object-reconstruction: 用于对象级别的容错, 启用对象血缘跟踪, 支持对象重建, 提高容错能力
 # num-cpus=0: head节点不分配任务，只做调度
 start_ray_head() {
-    log_msg "INFO" "Start Ray Head: ${POD_NAME}"
+    log_msg "INFO" "Starting Ray Head: ${POD_NAME}"
+    
+    # 导出 Ray 容错相关环境变量
+    export RAY_max_direct_call_object_size
+    export RAY_task_retry_delay_ms
+    export RAY_health_check_initial_delay_ms
+    export RAY_health_check_period_ms
+    export RAY_health_check_timeout_ms
+    export RAY_health_check_failure_threshold
+    export RAY_gcs_rpc_server_reconnect_timeout_s
+    export RAY_gcs_server_request_timeout_seconds
+    #export RAY_gcs_storage_check_connection_delay_ms
+    #export RAY_actor_restart_on_raylet_death
+    
+    # 设置 GCS 外部存储命名空间
+    export RAY_REDIS_ADDRESS=${GCS_STORAGE_ADDRESS}
+    export RAY_external_storage_namespace="${GCS_STORAGE_NAMESPACE}"
+    
+    log_msg "INFO" "Fault tolerance configuration:"
+    log_msg "INFO" "  - GCS external storage: ${GCS_STORAGE_ADDRESS}"
+    log_msg "INFO" "  - Storage namespace: ${RAY_external_storage_namespace}"
+    log_msg "INFO" "  - Object reconstruction: Enabled"
+    log_msg "INFO" "  - Worker health check: Enabled (period: 10s, timeout: 30s)"
+    
+    # 启动 Ray Head
     if ray start --head \
         --port=$GCS_PORT \
         --dashboard-host=0.0.0.0 \
         --dashboard-port=$DASHBOARD_PORT \
         --include-dashboard=true \
         --object-store-memory=$RAY_OBJECT_STORE_MEMORY \
-        --num-cpus=0 ; then
+        --enable-object-reconstruction ; then
         
-        if ray status >/dev/null 2>&1; then
-            log_msg "INFO" "Ray Head start success"
-            return 0
-        fi
+        # 等待 Ray 完全启动
+        local retries=0
+        local max_retries=30
+        while [ $retries -lt $max_retries ]; do
+            if ray status >/dev/null 2>&1; then
+                log_msg "INFO" "Ray Head started successfully, GCS service available"
+                
+                # 显示集群状态
+                log_msg "INFO" "Cluster status:"
+                ray status 2>&1 | while read line; do
+                    log_msg "INFO" "  $line"
+                done
+                
+                return 0
+            fi
+            retries=$((retries + 1))
+            sleep 2
+        done
     fi
-    log_msg "ERROR" "Ray Head start fail"
+    
+    log_msg "ERROR" "Ray Head failed to start"
     return 1
 }
 
-# 停止Ray Head
+# 停止Ray Head（优雅关闭）
 stop_ray_head() {
-    log_msg "INFO" "Stop Ray Head: ${POD_NAME}"
-    ray stop --force 2>/dev/null || true
+    log_msg "INFO" "Gracefully stopping Ray Head: ${POD_NAME}"
+
+    # 不使用 --force，允许正在运行的任务完成
+    # Ray 会自动将任务迁移到其他节点
+    ray stop 2>/dev/null || true
+
+    # 等待进程完全退出
+    sleep 5
 }
 
 # Leader选举和维护
 run_head_node() {
-    log_msg "INFO" "Begin Ray Head HA controller: ${POD_NAME}"
+    log_msg "INFO" "Starting Ray Head HA controller: ${POD_NAME}"
 
-        # 启动健康检查服务器
+    # 启动健康检查服务器
     start_health_check_server
 
     while true; do
         if try_acquire_leadership; then
-            log_msg "INFO" "Acquired Leadership ${POD_NAME}"
+            log_msg "INFO" "Acquired Leadership: ${POD_NAME}"
 
-            # 启动Ray Head
+            # 启动Ray Head（支持从外部存储恢复状态）
             if start_ray_head; then
                 # 维护Leader状态
                 while renew_leadership && ray status >/dev/null 2>&1; do
-                    log_msg "INFO" "Leadership renew succ: ${POD_NAME}"
+                    log_msg "DEBUG" "Leadership renew succ: ${POD_NAME}"
                     sleep $CHECK_INTERVAL
                 done
+
+                # 检测到异常
+                if ! renew_leadership; then
+                    log_msg "WARN" "Leader lock renewal failed, may have been preempted"
+                elif ! ray status >/dev/null 2>&1; then
+                    log_msg "ERROR" "Ray service status abnormal"
+                fi
+            else
+                log_msg "ERROR" "Ray Head failed to start"
             fi
 
-                        # 启动失败，或者续约失败，或者状态异常，释放自己的锁
-                        log_msg "WARNING" "Lose Leadership，stop Ray Head: ${POD_NAME}"
-                        local script='if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end'
-                        redis_cmd EVAL "$script" 1 "$LEADER_KEY" "$POD_IP:$GCS_PORT" 2>/dev/null || true
+            # 释放 Leader 锁（仅当自己持有时）
+            log_msg "WARN" "Lose Leadership, releasing lock and stopping Ray Head: ${POD_NAME}"
+            local script='if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end'
+            redis_cmd EVAL "$script" 1 "$LEADER_KEY" "$POD_IP:$GCS_PORT" 2>/dev/null || true
 
-                        # 这里强制stop一下, 避免变成standby模式后，又启动成功了, 导致出现多个head运行
-                        stop_ray_head
+            # 优雅停止 Ray Head（不强制终止运行中的任务）
+                        # 避免变成standby模式后，又启动成功了, 导致出现多个head运行
+            stop_ray_head
         else
             # Standby模式
             current_leader=$(redis_cmd GET "$LEADER_KEY" 2>/dev/null || echo "none")
-            log_msg "INFO" "Standby mod, current Leader: ${current_leader}"
+            log_msg "INFO" "Standby mode, current Leader: ${current_leader}"
         fi
         sleep $CHECK_INTERVAL
     done
@@ -318,31 +396,40 @@ get_current_leader() {
 
 connect_to_ray() {
     local head_address=$1
-    log_msg "INFO" "Connect to Ray Head: $head_address"
-    
+    log_msg "INFO" "Connecting to Ray Head: $head_address"
+
     # 停止现有连接
     ray stop 2>/dev/null || true
     sleep 2
-    
+
+    # 导出 Ray 容错相关环境变量
+    export RAY_max_direct_call_object_size
+    export RAY_task_retry_delay_ms
+    export RAY_health_check_initial_delay_ms
+    export RAY_health_check_period_ms
+    export RAY_health_check_timeout_ms
+    export RAY_health_check_failure_threshold
+
     # 尝试连接
     local retries=0
     while [ $retries -lt 5 ]; do
         if timeout $CONNECTION_TIMEOUT ray start \
             --address="$head_address" \
             --object-store-memory=$RAY_OBJECT_STORE_MEMORY ; then
-            
+
+            # 验证连接成功
             if ray status >/dev/null 2>&1; then
-                log_msg "INFO" "Connect to Ray Head success"
+                log_msg "INFO" "Successfully connected to Ray Head, Worker node ready"
                 return 0
             fi
         fi
-        
+
         retries=$((retries + 1))
-        log_msg "WARNING" "Connect to Ray Head fail retry $retries/5"
+        log_msg "WARN" "Failed to connect to Ray Head, retrying $retries/5"
         sleep 3
     done
-    
-    log_msg "ERROR" "Connect to Ray Head: $head_address finally fail after 5 retries"
+
+    log_msg "ERROR" "Failed to connect to Ray Head: $head_address after 5 retries"
     return 1
 }
 
@@ -350,6 +437,9 @@ connect_to_ray() {
 run_worker_node() {
     local current_head=""
     local connected=false
+    local reconnect_count=0
+
+    log_msg "INFO" "Starting Ray Worker node: ${POD_NAME}"
 
     while true; do
         local leader=$(get_current_leader)
@@ -357,23 +447,48 @@ run_worker_node() {
         if [ -n "$leader" ]; then
             # 检查是否需要连接/重连
             if [ "$leader" != "$current_head" ] || [ "$connected" = "false" ] || ! ray status >/dev/null 2>&1; then
-                [ "$leader" != "$current_head" ] && log_msg "INFO" "Detect new Ray Head Leader: $leader"
-                [ "$connected" = "true" ] && log_msg "WARNING" "Ray status abnormal, try to reconnect"
+
+                if [ "$leader" != "$current_head" ]; then
+                    log_msg "INFO" "Detected new Ray Head Leader: $leader (old: $current_head)"
+                    reconnect_count=0
+                fi
+
+                if [ "$connected" = "true" ] && ! ray status >/dev/null 2>&1; then
+                    reconnect_count=$((reconnect_count + 1))
+                    log_msg "WARN" "Ray status abnormal, attempting reconnection (attempt $reconnect_count)"
+                fi
 
                 if connect_to_ray "$leader"; then
                     current_head="$leader"
                     connected=true
+                    reconnect_count=0
+                    log_msg "INFO" "Worker node connected to Leader: $leader"
                 else
                     connected=false
+                    log_msg "ERROR" "Worker node connection failed"
+
+                    # 重连失败过多，清理状态
+                    if [ $reconnect_count -ge 3 ]; then
+                        log_msg "WARN" "Too many reconnection failures, cleaning up state"
+                        ray stop --force 2>/dev/null || true
+                        current_head=""
+                        reconnect_count=0
+                    fi
                 fi
+            else
+                # 连接正常，定期日志
+                log_msg "DEBUG" "Worker node running normally, Leader: $leader"
             fi
         else
             # 没有领导者，断开连接
             if [ "$connected" = "true" ]; then
-                log_msg "WARNING" "No Leader, stop connection"
+                log_msg "WARN" "No Leader detected, stopping connection"
                 ray stop 2>/dev/null || true
                 connected=false
                 current_head=""
+                reconnect_count=0
+            else
+                log_msg "INFO" "Waiting for Leader election to complete..."
             fi
         fi
 
@@ -383,17 +498,24 @@ run_worker_node() {
 
 # === 清理函数 ===
 cleanup() {
-    log_msg "INFO" "Received shutdown signal, cleaning up: ${POD_NAME}"
+    log_msg "INFO" "Received shutdown signal, starting cleanup: ${POD_NAME}"
+
     if [ "$NODE_ROLE" = "head" ]; then
-        log_msg "INFO" "Releasing leadership and stopping Ray Head"
+        log_msg "INFO" "Releasing Leader lock and stopping Ray Head"
+
+        # 释放 Leader 锁
         local script='if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end'
         redis_cmd EVAL "$script" 1 "$LEADER_KEY" "$POD_IP:$GCS_PORT" >/dev/null 2>&1 || true
+
+        # 优雅停止 Ray（允许任务迁移）
         stop_ray_head
-                stop_health_check_server
+        stop_health_check_server
     else
-        log_msg "INFO" "Stopping Ray worker"
+        log_msg "INFO" "Stopping Ray Worker"
+        # Worker 优雅退出，任务会自动迁移到其他 Worker
         ray stop 2>/dev/null || true
     fi
+
     log_msg "INFO" "Cleanup completed"
     exit 0
 }
@@ -418,15 +540,20 @@ main() {
             ;;
     esac
 
-    log_msg "INFO" "Start Ray HA cluster, role: $NODE_ROLE"
-    log_msg "INFO" "env: $app_env, pod: $POD_NAME ($POD_IP)"
-    log_msg "INFO" "Using leader key: $LEADER_KEY"
-    
+    log_msg "INFO" "===================================================="
+    log_msg "INFO" "Ray HA cluster startup"
+    log_msg "INFO" "===================================================="
+    log_msg "INFO" "Role: $NODE_ROLE"
+    log_msg "INFO" "Environment: $app_env"
+    log_msg "INFO" "Pod: $POD_NAME ($POD_IP)"
+    log_msg "INFO" "Leader Key: $LEADER_KEY"
+    log_msg "INFO" "===================================================="
+
     wait_for_redis
 
     # 注册信号处理
     trap cleanup TERM INT
-    
+
     case "$NODE_ROLE" in
         "head")
             run_head_node
@@ -435,7 +562,7 @@ main() {
             run_worker_node
             ;;
         *)
-            log_msg "ERROR" "Uknown role: $NODE_ROLE"
+            log_msg "ERROR" "Unknown role: $NODE_ROLE"
             exit 1
             ;;
     esac
