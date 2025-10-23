@@ -41,23 +41,23 @@ check_leader_exists() {
 liveness_check() {
     # Worker 存活检查：Ray 进程 + Plasma Store
     if ! check_ray_process; then
-        echo "✗ Worker: Raylet 进程未运行" >&2
+        echo "✗ Worker: Raylet Process Not Running" >&2
         return 1
     fi
     
     if ! check_plasma_store; then
-        echo "✗ Worker: Plasma Store 进程未运行" >&2
+        echo "✗ Worker: Plasma Store Process Not Running" >&2
         return 1
     fi
     
     # 检查 Ray 状态（容忍 Leader 切换期间的短暂失败）
     if ! check_ray_status; then
-        echo "⚠ Worker: Ray 状态异常（可能 Leader 切换中）" >&2
+        echo "⚠ Worker: Ray Status Abnormal (Possible Leader Switch)" >&2
         # 不立即返回失败，给予容忍时间
         return 0
     fi
     
-    echo "✓ Worker: 健康" >&2
+    echo "✓ Worker: Healthy" >&2
     return 0
 }
 
@@ -67,26 +67,26 @@ liveness_check() {
 readiness_check() {
     # Worker 就绪检查：Ray 进程 + Ray 状态正常 + 有 Leader
     if ! check_ray_process; then
-        echo "✗ Worker: Raylet 进程未运行" >&2
+        echo "✗ Worker: Raylet Process Not Running" >&2
         return 1
     fi
     
     if ! check_plasma_store; then
-        echo "✗ Worker: Plasma Store 进程未运行" >&2
+        echo "✗ Worker: Plasma Store Process Not Running" >&2
         return 1
     fi
     
     if ! check_ray_status; then
-        echo "✗ Worker: Ray 集群连接异常" >&2
+        echo "✗ Worker: Ray Cluster Connection Abnormal" >&2
         return 1
     fi
     
     if ! check_leader_exists; then
-        echo "⏳ Worker: 等待 Leader 选举" >&2
+        echo "⏳ Worker: Waiting For Leader Election" >&2
         return 1
     fi
     
-    echo "✓ Worker: 就绪" >&2
+    echo "✓ Worker: Ready" >&2
     return 0
 }
 
@@ -97,10 +97,10 @@ main() {
     case "${1:-liveness}" in
         liveness|live|l)
             liveness_check
-            ;;
+            ;; 
         readiness|ready|r)
             readiness_check
-            ;;
+            ;; 
         *)
             echo "Usage: $0 {liveness|readiness}" >&2
             exit 1
